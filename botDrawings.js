@@ -1228,10 +1228,10 @@ function getBotDrawingSegments(word) {
     Star(Y, 7, 0.50, 0.50, 0.14, 0.06, 5)
   ];
 
-  const shiftX = (Math.random() - 0.5) * 0.08;
-  const shiftY = (Math.random() - 0.5) * 0.06;
-  const scale = 0.86 + Math.random() * 0.22;
-  const tilt = (Math.random() - 0.5) * 0.16;
+  const shiftX = (Math.random() - 0.5) * 0.11;
+  const shiftY = (Math.random() - 0.5) * 0.08;
+  const scale = 0.78 + Math.random() * 0.32;
+  const tilt = (Math.random() - 0.5) * 0.24;
   const cosT = Math.cos(tilt);
   const sinT = Math.sin(tilt);
 
@@ -1241,34 +1241,76 @@ function getBotDrawingSegments(word) {
     const rx = dx * cosT - dy * sinT + 0.5 + shiftX + slipX;
     const ry = dx * sinT + dy * cosT + 0.5 + shiftY + slipY;
     return [
-      Math.max(0.06, Math.min(0.94, rx)),
-      Math.max(0.06, Math.min(0.94, ry))
+      Math.max(0.05, Math.min(0.95, rx)),
+      Math.max(0.05, Math.min(0.95, ry))
     ];
   };
+
+  // Add a small amount of messy coloring-in inside up to 2 main colored shapes for clues
+  const workingStrokes = [];
+  let colorFillCount = 0;
+  for (let i = 0; i < recipe.length; i += 1) {
+    const s = recipe[i];
+    workingStrokes.push(s);
+    const pts = s.pts || [];
+    if (colorFillCount < 2 && pts.length >= 4 && s.color !== K) {
+      let minX = 1, maxX = 0, minY = 1, maxY = 0;
+      for (const [px, py] of pts) {
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+      const bw = maxX - minX;
+      const bh = maxY - minY;
+      if (bw >= 0.11 && bh >= 0.11) {
+        colorFillCount += 1;
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const rx = bw * 0.26;
+        const ry = bh * 0.24;
+        workingStrokes.push({
+          color: s.color,
+          size: Math.min(20, Math.max(10, Math.round((s.size || 8) * 1.6))),
+          pts: [
+            [cx - rx, cy - ry * 0.75],
+            [cx + rx * 0.9, cy - ry * 0.35],
+            [cx - rx * 0.85, cy + ry * 0.15],
+            [cx + rx, cy + ry * 0.65],
+            [cx - rx * 0.6, cy + ry * 0.85]
+          ],
+          isColorFill: true
+        });
+      }
+    }
+  }
 
   const segments = [];
   let prevColor = null;
 
-  for (let strokeIdx = 0; strokeIdx < recipe.length; strokeIdx += 1) {
-    const stroke = recipe[strokeIdx];
+  for (let strokeIdx = 0; strokeIdx < workingStrokes.length; strokeIdx += 1) {
+    const stroke = workingStrokes[strokeIdx];
     const rawPts = stroke.pts || [];
     if (!rawPts.length) continue;
 
-    const slipX = strokeIdx === 0 ? 0 : (Math.random() - 0.5) * 0.022;
-    const slipY = strokeIdx === 0 ? 0 : (Math.random() - 0.5) * 0.022;
+    const slipScale = stroke.isColorFill ? 0.015 : 0.036;
+    const slipX = strokeIdx === 0 ? 0 : (Math.random() - 0.5) * slipScale;
+    const slipY = strokeIdx === 0 ? 0 : (Math.random() - 0.5) * slipScale;
     const pts = rawPts.map((pt) => transformPt(pt, slipX, slipY));
     const sizeJitter = Math.max(
       2,
-      Math.round(stroke.size * (0.82 + Math.random() * 0.36))
+      Math.round(stroke.size * (0.8 + Math.random() * 0.42))
     );
 
     const colorChanged = prevColor && prevColor !== stroke.color;
     const startPauseMs =
       strokeIdx === 0
-        ? 450
+        ? 420
+        : stroke.isColorFill
+        ? 160 + Math.random() * 140
         : colorChanged
-        ? 440 + Math.random() * 420
-        : 200 + Math.random() * 280;
+        ? 420 + Math.random() * 380
+        : 200 + Math.random() * 260;
     prevColor = stroke.color;
 
     if (pts.length === 1) {
@@ -1285,15 +1327,15 @@ function getBotDrawingSegments(word) {
       continue;
     }
 
-    let prevX = pts[0][0] + (Math.random() - 0.5) * 0.022;
-    let prevY = pts[0][1] + (Math.random() - 0.5) * 0.022;
+    let prevX = pts[0][0] + (Math.random() - 0.5) * 0.032;
+    let prevY = pts[0][1] + (Math.random() - 0.5) * 0.032;
     let isFirstSegOfStroke = true;
 
     for (let i = 0; i < pts.length - 1; i += 1) {
       const ax = prevX;
       const ay = prevY;
       const isLastEdge = i === pts.length - 2;
-      const endJitter = isLastEdge ? 0.028 : 0.018;
+      const endJitter = isLastEdge ? 0.042 : 0.026;
       const bx = pts[i + 1][0] + (Math.random() - 0.5) * endJitter;
       const by = pts[i + 1][1] + (Math.random() - 0.5) * endJitter;
 
@@ -1304,11 +1346,11 @@ function getBotDrawingSegments(word) {
 
       const nx = -dy / dist;
       const ny = dx / dist;
-      const subSteps = Math.max(2, Math.min(10, Math.ceil(dist / 0.028)));
-      const bow = (Math.random() - 0.5) * Math.min(0.036, dist * 0.24);
-      const waveFreq = 1.8 + Math.random() * 2.8;
+      const subSteps = Math.max(2, Math.min(9, Math.ceil(dist / 0.032)));
+      const bow = (Math.random() - 0.5) * Math.min(0.055, dist * 0.34);
+      const waveFreq = 1.8 + Math.random() * 3.2;
       const wavePhase = Math.random() * Math.PI * 2;
-      const waveAmp = Math.min(0.012, dist * 0.09);
+      const waveAmp = Math.min(0.018, dist * 0.13);
 
       let curX = ax;
       let curY = ay;
