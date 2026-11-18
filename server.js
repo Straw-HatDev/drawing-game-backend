@@ -3,7 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const { WORD_POOL } = require("./words");
-const { getBotDrawingSegments } = require("./botDrawings");
+const { getBotDrawingSegments, getBotDetailSegments } = require("./botDrawings");
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -604,15 +604,11 @@ function scheduleServerBotDrawing(room, word) {
   if (!segments.length) return;
 
   const rawTotal = segments.reduce((sum, s) => sum + (s.delayMs || 50), 0);
-  const targetTotal = Math.min(18000, Math.max(9000, rawTotal));
+  const targetTotal = Math.min(22000, Math.max(12500, rawTotal * 1.25));
   const timeScale = rawTotal > 0 ? targetTotal / rawTotal : 1;
   let idx = 0;
 
-  const drawTick = () => {
-    if (!rooms.has(room.code) || room.phase !== "drawing") return;
-    if (idx >= segments.length) return;
-
-    const seg = segments[idx];
+  const emitSeg = (seg) => {
     const stroke = {
       x0: seg.x0,
       y0: seg.y0,
@@ -624,10 +620,47 @@ function scheduleServerBotDrawing(room, word) {
     };
     room.strokes.push(stroke);
     io.to(room.code).emit("draw_stroke", stroke);
+  };
 
+  const startDetailPass = () => {
+    if (!rooms.has(room.code) || room.phase !== "drawing") return;
+    const detailSegs = getBotDetailSegments(word, segments._transformMeta);
+    if (!detailSegs.length) return;
+    let dIdx = 0;
+
+    const detailTick = () => {
+      if (!rooms.has(room.code) || room.phase !== "drawing") return;
+      if (dIdx >= detailSegs.length) {
+        addBotTimer(room, startDetailPass, 500);
+        return;
+      }
+      emitSeg(detailSegs[dIdx]);
+      dIdx += 1;
+      if (dIdx >= detailSegs.length) {
+        addBotTimer(room, startDetailPass, 500);
+        return;
+      }
+      const nextDelay = Math.max(60, (detailSegs[dIdx].delayMs || 100) * 1.2);
+      addBotTimer(room, detailTick, nextDelay);
+    };
+
+    addBotTimer(room, detailTick, 160);
+  };
+
+  const drawTick = () => {
+    if (!rooms.has(room.code) || room.phase !== "drawing") return;
+    if (idx >= segments.length) {
+      addBotTimer(room, startDetailPass, 7000);
+      return;
+    }
+
+    emitSeg(segments[idx]);
     idx += 1;
-    if (idx >= segments.length) return;
-    const nextDelay = Math.max(18, (segments[idx].delayMs || 45) * timeScale);
+    if (idx >= segments.length) {
+      addBotTimer(room, startDetailPass, 7000);
+      return;
+    }
+    const nextDelay = Math.max(26, (segments[idx].delayMs || 45) * timeScale);
     addBotTimer(room, drawTick, nextDelay);
   };
 
@@ -643,7 +676,7 @@ function scheduleServerBotsGuessingBot(room, botDrawerId, secretWord) {
   const pickDecoy = () => decoys[Math.floor(Math.random() * decoys.length)];
   const guesserBot = otherBots[0];
 
-  [7000, 15000, 21500].forEach((delay) => {
+  [8500, 17500, 24000].forEach((delay) => {
     addBotTimer(room, () => {
       if (!rooms.has(room.code) || room.phase !== "drawing") return;
       io.to(room.code).emit("chat_message", {
@@ -656,7 +689,7 @@ function scheduleServerBotsGuessingBot(room, botDrawerId, secretWord) {
     }, delay);
   });
 
-  const solveAt = 25000 + Math.random() * 3200;
+  const solveAt = 26500 + Math.random() * 2500;
   addBotTimer(room, () => {
     if (!rooms.has(room.code) || room.phase !== "drawing") return;
     finishRound(room, "guessed", guesserBot);
@@ -706,8 +739,8 @@ function scheduleServerBotsGuessingHuman(room, secretWord) {
       emitSystemChat(room, `💥 ${bot.name} fired the Paint Blaster!`);
     }
 
-    const requiredSeconds = Math.max(11, 24 - completeness * 11);
-    if (completeness >= 0.48 && elapsedSec >= requiredSeconds) {
+    const requiredSeconds = Math.max(15, 27 - completeness * 9);
+    if (completeness > 0.5 && elapsedSec >= requiredSeconds) {
       finishRound(room, "guessed", bot);
       return;
     }
@@ -725,11 +758,11 @@ function scheduleServerBotsGuessingHuman(room, secretWord) {
       type: "guess"
     });
 
-    const nextDelay = 5000 + Math.random() * 3000;
+    const nextDelay = 6200 + Math.random() * 3300;
     addBotTimer(room, attemptBotGuess, nextDelay);
   };
 
-  addBotTimer(room, attemptBotGuess, 6500);
+  addBotTimer(room, attemptBotGuess, 8000);
 }
 
 function finishRound(room, reason, winnerPlayer) {
@@ -744,16 +777,18 @@ function finishRound(room, reason, winnerPlayer) {
 
   if (reason === "guessed" && winnerPlayer) {
     const elapsedMs = Date.now() - (room.roundStartTime || Date.now());
-    const points = elapsedMs < 30000 ? 8 : 5;
-    pointsAwarded = points;
-    drawerDelta = points;
-    winnerPlayer.score += points;
+    const isFastBonus = elapsedMs < 15000;
+    const guesserPts = isFastBonus ? 10 : 6;
+    const drawerPts = isFastBonus ? 8 : 5;
+    pointsAwarded = guesserPts;
+    drawerDelta = drawerPts;
+    winnerPlayer.score += guesserPts;
     if (drawer) {
-      drawer.score += points;
+      drawer.score += drawerPts;
     }
     emitSystemChat(
       room,
-      `🎉 ${winnerPlayer.name}: ${revealedWord} (+${points} pts)`,
+      `🎉 ${winnerPlayer.name}: ${revealedWord} (+${guesserPts} pts)`,
       "correct"
     );
   } else if (reason === "timeout") {

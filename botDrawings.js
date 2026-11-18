@@ -1392,7 +1392,112 @@ function getBotDrawingSegments(word) {
       prevY = curY;
     }
   }
+  segments._transformMeta = { shiftX, shiftY, scale, tilt };
   return segments;
 }
 
-module.exports = { getBotDrawingSegments };
+function getBotDetailSegments(word, meta = null) {
+  const recipe = BOT_DRAWINGS[word] || [
+    C(B, 9, 0.50, 0.50, 0.20),
+    Star(Y, 7, 0.50, 0.50, 0.14, 0.06, 5)
+  ];
+  const m = meta || { shiftX: 0, shiftY: 0, scale: 0.9, tilt: 0 };
+  const cosT = Math.cos(m.tilt);
+  const sinT = Math.sin(m.tilt);
+
+  const transformPt = ([px, py]) => {
+    const dx = (px - 0.5) * m.scale;
+    const dy = (py - 0.5) * m.scale;
+    const rx = dx * cosT - dy * sinT + 0.5 + m.shiftX;
+    const ry = dx * sinT + dy * cosT + 0.5 + m.shiftY;
+    return [
+      Math.max(0.05, Math.min(0.95, rx)),
+      Math.max(0.05, Math.min(0.95, ry))
+    ];
+  };
+
+  const detailStrokes = [];
+  for (let i = 0; i < recipe.length; i += 1) {
+    const s = recipe[i];
+    const pts = s.pts || [];
+    if (pts.length >= 4 && s.color !== K) {
+      let minX = 1, maxX = 0, minY = 1, maxY = 0;
+      for (const [px, py] of pts) {
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+      const bw = maxX - minX;
+      const bh = maxY - minY;
+      if (bw >= 0.08 && bh >= 0.08) {
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const rx = bw * 0.3;
+        const ry = bh * 0.28;
+        detailStrokes.push({
+          color: s.color,
+          size: Math.min(18, Math.max(8, Math.round((s.size || 8) * 1.35))),
+          pts: [
+            [cx - rx, cy - ry * 0.6],
+            [cx + rx, cy - ry * 0.6],
+            [cx - rx * 0.9, cy],
+            [cx + rx * 0.9, cy],
+            [cx - rx, cy + ry * 0.6],
+            [cx + rx, cy + ry * 0.6]
+          ]
+        });
+      }
+    }
+    detailStrokes.push(s);
+  }
+
+  const segments = [];
+  for (let si = 0; si < detailStrokes.length; si += 1) {
+    const stroke = detailStrokes[si];
+    const pts = (stroke.pts || []).map(transformPt);
+    if (!pts.length) continue;
+    if (pts.length === 1) {
+      segments.push({
+        x0: pts[0][0],
+        y0: pts[0][1],
+        x1: pts[0][0],
+        y1: pts[0][1],
+        color: stroke.color,
+        size: Math.max(3, stroke.size || 6),
+        isDot: true,
+        delayMs: 220
+      });
+      continue;
+    }
+    for (let i = 0; i < pts.length - 1; i += 1) {
+      const [ax, ay] = pts[i];
+      const [bx, by] = pts[i + 1];
+      const dist = Math.hypot(bx - ax, by - ay);
+      if (dist < 0.001) continue;
+      const steps = Math.max(1, Math.min(5, Math.ceil(dist / 0.05)));
+      let cx = ax;
+      let cy = ay;
+      for (let st = 1; st <= steps; st += 1) {
+        const t = st / steps;
+        const nx = ax + (bx - ax) * t + (Math.random() - 0.5) * 0.006;
+        const ny = ay + (by - ay) * t + (Math.random() - 0.5) * 0.006;
+        segments.push({
+          x0: cx,
+          y0: cy,
+          x1: Math.max(0.04, Math.min(0.96, nx)),
+          y1: Math.max(0.04, Math.min(0.96, ny)),
+          color: stroke.color,
+          size: Math.max(3, stroke.size || 6),
+          isDot: false,
+          delayMs: i === 0 && st === 1 ? 260 : 75
+        });
+        cx = Math.max(0.04, Math.min(0.96, nx));
+        cy = Math.max(0.04, Math.min(0.96, ny));
+      }
+    }
+  }
+  return segments;
+}
+
+module.exports = { getBotDrawingSegments, getBotDetailSegments };
