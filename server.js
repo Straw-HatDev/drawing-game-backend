@@ -3,6 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const { WORD_POOL } = require("./words");
+const { getBotDrawingSegments } = require("./botDrawings");
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -13,7 +14,8 @@ const MAX_ROUNDS = 10;
 const INTRO_SPIN_DURATION_MS = 5000;
 const INTRO_POST_SPIN_HOLD_MS = 1800;
 const WORD_CHOICE_SECONDS = 10;
-const DRAW_SECONDS = 60;
+const DRAW_SECONDS = 30;
+const BLASTER_WINDOW_MS = 20 * 1000;
 const ROUND_END_PAUSE_MS = 3800;
 
 const SEAT_COLORS = ["#ef4444", "#3b82f6", "#22c55e", "#f59e0b", "#a855f7"];
@@ -207,6 +209,17 @@ function clearRoomTimers(room) {
     clearInterval(room.tickInterval);
     room.tickInterval = null;
   }
+  if (Array.isArray(room.botTimers)) {
+    room.botTimers.forEach((id) => clearTimeout(id));
+    room.botTimers = [];
+  }
+}
+
+function addBotTimer(room, fn, ms) {
+  if (!Array.isArray(room.botTimers)) room.botTimers = [];
+  const id = setTimeout(fn, ms);
+  room.botTimers.push(id);
+  return id;
 }
 
 const ALLOWED_HAIR_STYLES = new Set([
@@ -220,14 +233,37 @@ const ALLOWED_HAIR_STYLES = new Set([
   "anime"
 ]);
 
+const ALLOWED_SHIRT_DECALS = new Set([
+  "none",
+  "chief",
+  "cbert",
+  "hunter",
+  "fours",
+  "tubz"
+]);
+
+const SPECIAL_DECAL_COLORS = {
+  chief: "#0ea5e9",
+  cbert: "#dc2626",
+  hunter: "#10b981",
+  fours: "#a855f7",
+  tubz: "#f97316"
+};
+
 function sanitizeAvatar(raw, fallbackShirtColor) {
   const isHex = (v) => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
+  const rawDecal = raw && typeof raw.shirtDecal === "string" ? raw.shirtDecal.toLowerCase() : "none";
+  const shirtDecal = ALLOWED_SHIRT_DECALS.has(rawDecal) ? rawDecal : "none";
   const shirtColor =
-    raw && isHex(raw.shirtColor) ? raw.shirtColor : fallbackShirtColor;
+    shirtDecal !== "none"
+      ? SPECIAL_DECAL_COLORS[shirtDecal]
+      : raw && isHex(raw.shirtColor)
+        ? raw.shirtColor
+        : fallbackShirtColor;
   const hairColor = raw && isHex(raw.hairColor) ? raw.hairColor : "#4a2c18";
   const hairStyle =
     raw && ALLOWED_HAIR_STYLES.has(raw.hairStyle) ? raw.hairStyle : "classic";
-  return { shirtColor, hairColor, hairStyle };
+  return { shirtColor, shirtDecal, hairColor, hairStyle };
 }
 
 function serializePlayers(room) {
@@ -236,11 +272,103 @@ function serializePlayers(room) {
     name: p.name,
     score: p.score,
     isHost: p.id === room.hostId,
+    isBot: Boolean(p.isBot),
     seatColor: p.seatColor,
     shirtColor: p.shirtColor,
+    shirtDecal: p.shirtDecal || "none",
     hairColor: p.hairColor,
     hairStyle: p.hairStyle
   }));
+}
+
+const BOT_PROFILES = [
+  { id: "bot_leo", color: "#ef4444" },
+  { id: "bot_maya", color: "#22c55e" }
+];
+const BOT_NAME_POOL = [
+  "Leo",
+  "Maya",
+  "Zoe",
+  "Kai",
+  "Milo",
+  "Nova",
+  "Liam",
+  "Aria",
+  "Noah",
+  "Chloe",
+  "Evan",
+  "Ruby",
+  "Owen",
+  "Nora",
+  "Finn",
+  "Ivy",
+  "Sam",
+  "Jude",
+  "Toby",
+  "Zara"
+];
+const BOT_HAIR_COLORS = [
+  "#4a2c18",
+  "#111827",
+  "#eab308",
+  "#d97706",
+  "#2563eb",
+  "#ec4899",
+  "#9333ea",
+  "#cbd5e1"
+];
+
+function pickRandomBotName(takenLowerSet) {
+  const candidates = BOT_NAME_POOL.filter(
+    (n) => !takenLowerSet.has(n.toLowerCase())
+  );
+  const pool = candidates.length ? candidates : BOT_NAME_POOL;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function createBotPlayer(slotIdx, excludeStyle = null, takenLowerSet = new Set()) {
+  const profile = BOT_PROFILES[slotIdx % BOT_PROFILES.length];
+  const styles = [...ALLOWED_HAIR_STYLES].filter((s) => s !== excludeStyle);
+  const hairStyle = styles[Math.floor(Math.random() * styles.length)] || "classic";
+  const hairColor =
+    BOT_HAIR_COLORS[Math.floor(Math.random() * BOT_HAIR_COLORS.length)];
+  const name = pickRandomBotName(takenLowerSet);
+  takenLowerSet.add(name.toLowerCase());
+  return {
+    id: profile.id,
+    name,
+    score: 0,
+    isHost: false,
+    isBot: true,
+    seatColor: profile.color,
+    shirtColor: profile.color,
+    hairColor,
+    hairStyle
+  };
+}
+
+function syncRoomBots(room, desiredCount) {
+  const clamped = Math.max(0, Math.min(1, Number(desiredCount) || 0));
+  const humans = room.players.filter((p) => !p.isBot);
+  const maxAllowedBots = Math.min(1, Math.max(0, MAX_PLAYERS - humans.length));
+  const finalBots = Math.min(clamped, maxAllowedBots);
+
+  const existingBots = room.players.filter((p) => p.isBot);
+  const takenLower = new Set(humans.map((h) => String(h.name || "").toLowerCase()));
+  const nextBots = [];
+  for (let i = 0; i < finalBots; i += 1) {
+    const profile = BOT_PROFILES[i];
+    const existing = existingBots.find((b) => b.id === profile.id);
+    if (existing) {
+      takenLower.add(String(existing.name || "").toLowerCase());
+      nextBots.push(existing);
+    } else {
+      const otherStyle = nextBots[0] ? nextBots[0].hairStyle : null;
+      nextBots.push(createBotPlayer(i, otherStyle, takenLower));
+    }
+  }
+  room.players = [...humans, ...nextBots];
+  return finalBots;
 }
 
 function buildRoomState(room) {
@@ -318,8 +446,8 @@ function startNewMatch(room) {
   const now = Date.now();
   room.players.forEach((p) => {
     p.score = 0;
-    // Random initial Paint Blaster wait between 60s and 240s per player
-    const waitSec = 60 + Math.floor(Math.random() * 181);
+    // Random initial Paint Blaster wait between 50s and 120s per player
+    const waitSec = 50 + Math.floor(Math.random() * 71);
     p.blasterReadyAt = now + waitSec * 1000;
   });
 
@@ -342,7 +470,9 @@ function startNewMatch(room) {
   });
 
   room.players.forEach((p) => {
-    io.to(p.id).emit("blaster_state", { readyAt: p.blasterReadyAt });
+    if (!p.isBot) {
+      io.to(p.id).emit("blaster_state", { readyAt: p.blasterReadyAt });
+    }
   });
 
   room.phaseTimeout = setTimeout(() => {
@@ -379,11 +509,21 @@ function beginWordChoice(room, drawer) {
     timeLeft: WORD_CHOICE_SECONDS
   });
 
-  // Send the 3 word options privately to the drawer only
-  io.to(drawer.id).emit("drawer_word_options", {
-    words: room.wordOptions,
-    timeLeft: WORD_CHOICE_SECONDS
-  });
+  // Send the 3 word options privately to human drawer, or auto-pick for a bot
+  if (drawer.isBot) {
+    addBotTimer(room, () => {
+      if (!rooms.has(room.code) || room.phase !== "word_choice") return;
+      const botWord =
+        room.wordOptions[Math.floor(Math.random() * room.wordOptions.length)] ||
+        WORD_POOL[0];
+      beginDrawingPhase(room, botWord);
+    }, 1600);
+  } else {
+    io.to(drawer.id).emit("drawer_word_options", {
+      words: room.wordOptions,
+      timeLeft: WORD_CHOICE_SECONDS
+    });
+  }
 
   emitSystemChat(room, `Round ${room.round}: ${drawer.name} is choosing a word...`);
 
@@ -403,6 +543,8 @@ function beginDrawingPhase(room, chosenWord) {
   room.usedWords.add(chosenWord);
   room.wordOptions = [];
   room.strokes = [];
+  room.drawInkDistance = 0;
+  room.drawStrokeCount = 0;
   room.roundStartTime = Date.now();
   room.phaseEndsAt = room.roundStartTime + DRAW_SECONDS * 1000;
 
@@ -425,10 +567,12 @@ function beginDrawingPhase(room, chosenWord) {
     wordHint: buildWordHint(chosenWord)
   });
 
-  // Private payload only for the drawer
-  io.to(drawer.id).emit("drawer_secret_word", {
-    word: chosenWord
-  });
+  if (!drawer.isBot) {
+    // Private payload only for human drawer
+    io.to(drawer.id).emit("drawer_secret_word", {
+      word: chosenWord
+    });
+  }
 
   emitSystemChat(room, `${drawer.name} started drawing! Guess the word!`);
 
@@ -436,6 +580,152 @@ function beginDrawingPhase(room, chosenWord) {
     if (!rooms.has(room.code) || room.phase !== "drawing") return;
     finishRound(room, "timeout", null);
   });
+
+  if (drawer.isBot) {
+    scheduleServerBotDrawing(room, chosenWord);
+    scheduleServerBotsGuessingBot(room, drawer.id, chosenWord);
+  } else {
+    scheduleServerBotsGuessingHuman(room, chosenWord);
+  }
+}
+
+function getRoomDrawCompleteness(room) {
+  const distFactor = Math.min(1, (room.drawInkDistance || 0) / 1.8);
+  const countFactor = Math.min(1, (room.drawStrokeCount || 0) / 4);
+  return Math.min(1, distFactor * 0.75 + countFactor * 0.25);
+}
+
+function scheduleServerBotDrawing(room, word) {
+  const segments = getBotDrawingSegments(word);
+  if (!segments.length) return;
+
+  const rawTotal = segments.reduce((sum, s) => sum + (s.delayMs || 50), 0);
+  const targetTotal = Math.min(18000, Math.max(9000, rawTotal));
+  const timeScale = rawTotal > 0 ? targetTotal / rawTotal : 1;
+  let idx = 0;
+
+  const drawTick = () => {
+    if (!rooms.has(room.code) || room.phase !== "drawing") return;
+    if (idx >= segments.length) return;
+
+    const seg = segments[idx];
+    const stroke = {
+      x0: seg.x0,
+      y0: seg.y0,
+      x1: seg.x1,
+      y1: seg.y1,
+      color: seg.color,
+      size: seg.size,
+      isDot: Boolean(seg.isDot)
+    };
+    room.strokes.push(stroke);
+    io.to(room.code).emit("draw_stroke", stroke);
+
+    idx += 1;
+    if (idx >= segments.length) return;
+    const nextDelay = Math.max(18, (segments[idx].delayMs || 45) * timeScale);
+    addBotTimer(room, drawTick, nextDelay);
+  };
+
+  const initialDelay = Math.max(350, (segments[0].delayMs || 450) * timeScale);
+  addBotTimer(room, drawTick, initialDelay);
+}
+
+function scheduleServerBotsGuessingBot(room, botDrawerId, secretWord) {
+  const otherBots = room.players.filter((p) => p.isBot && p.id !== botDrawerId);
+  if (!otherBots.length) return;
+
+  const decoys = WORD_POOL.filter((w) => w !== secretWord);
+  const pickDecoy = () => decoys[Math.floor(Math.random() * decoys.length)];
+  const guesserBot = otherBots[0];
+
+  [7000, 15000, 21500].forEach((delay) => {
+    addBotTimer(room, () => {
+      if (!rooms.has(room.code) || room.phase !== "drawing") return;
+      io.to(room.code).emit("chat_message", {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        senderId: guesserBot.id,
+        senderName: guesserBot.name,
+        text: pickDecoy(),
+        type: "guess"
+      });
+    }, delay);
+  });
+
+  const solveAt = 25000 + Math.random() * 3200;
+  addBotTimer(room, () => {
+    if (!rooms.has(room.code) || room.phase !== "drawing") return;
+    finishRound(room, "guessed", guesserBot);
+  }, solveAt);
+}
+
+function scheduleServerBotsGuessingHuman(room, secretWord) {
+  const bots = room.players.filter((p) => p.isBot);
+  if (!bots.length) return;
+
+  const decoys = WORD_POOL.filter((w) => w !== secretWord);
+  const usedDecoys = new Set();
+  const pickDecoy = () => {
+    for (let i = 0; i < 15; i += 1) {
+      const w = decoys[Math.floor(Math.random() * decoys.length)];
+      if (!usedDecoys.has(w)) {
+        usedDecoys.add(w);
+        return w;
+      }
+    }
+    return decoys[Math.floor(Math.random() * decoys.length)];
+  };
+
+  let turnIdx = 0;
+  const attemptBotGuess = () => {
+    if (!rooms.has(room.code) || room.phase !== "drawing") return;
+
+    const bot = bots[turnIdx % bots.length];
+    turnIdx += 1;
+
+    const elapsedSec = (Date.now() - room.roundStartTime) / 1000;
+    const completeness = getRoomDrawCompleteness(room);
+
+    if (
+      Date.now() >= (bot.blasterReadyAt || Infinity) &&
+      Date.now() - (room.roundStartTime || 0) < BLASTER_WINDOW_MS &&
+      completeness >= 0.25
+    ) {
+      bot.blasterReadyAt = Date.now() + 220 * 1000;
+      room.drawInkDistance *= 0.2;
+      const seed = Math.floor(Math.random() * 1000000000);
+      io.to(room.code).emit("paint_blaster_splat", {
+        byId: bot.id,
+        byName: bot.name,
+        seed
+      });
+      emitSystemChat(room, `💥 ${bot.name} fired the Paint Blaster!`);
+    }
+
+    const requiredSeconds = Math.max(11, 24 - completeness * 11);
+    if (completeness >= 0.48 && elapsedSec >= requiredSeconds) {
+      finishRound(room, "guessed", bot);
+      return;
+    }
+
+    const msgText =
+      completeness < 0.08 && elapsedSec < 12 && turnIdx === 1
+        ? "Waiting to see the first lines..."
+        : pickDecoy();
+
+    io.to(room.code).emit("chat_message", {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      senderId: bot.id,
+      senderName: bot.name,
+      text: msgText,
+      type: "guess"
+    });
+
+    const nextDelay = 5000 + Math.random() * 3000;
+    addBotTimer(room, attemptBotGuess, nextDelay);
+  };
+
+  addBotTimer(room, attemptBotGuess, 6500);
 }
 
 function finishRound(room, reason, winnerPlayer) {
@@ -535,15 +825,16 @@ function removePlayerFromRoom(socket, room) {
   socket.leave(room.code);
   socket.data.roomCode = null;
 
-  if (room.players.length === 0) {
+  const humans = room.players.filter((p) => !p.isBot);
+  if (humans.length === 0) {
     clearRoomTimers(room);
     rooms.delete(room.code);
     return;
   }
 
   if (room.hostId === removed.id) {
-    room.hostId = room.players[0].id;
-    room.players[0].isHost = true;
+    room.hostId = humans[0].id;
+    humans[0].isHost = true;
   }
 
   emitSystemChat(room, `${removed.name} left the room.`);
@@ -615,8 +906,10 @@ io.on("connection", (socket) => {
       name: sanitizeNickname(payload.nickname),
       score: 0,
       isHost: true,
+      isBot: false,
       seatColor: avatar.shirtColor,
       shirtColor: avatar.shirtColor,
+      shirtDecal: avatar.shirtDecal,
       hairColor: avatar.hairColor,
       hairStyle: avatar.hairStyle
     };
@@ -677,6 +970,7 @@ io.on("connection", (socket) => {
       isHost: false,
       seatColor: avatar.shirtColor,
       shirtColor: avatar.shirtColor,
+      shirtDecal: avatar.shirtDecal,
       hairColor: avatar.hairColor,
       hairStyle: avatar.hairStyle
     };
@@ -773,6 +1067,13 @@ io.on("connection", (socket) => {
     if (room.strokes.length > 15000) {
       room.strokes.shift();
     }
+    if (color.toLowerCase() !== "#ffffff") {
+      if (isDot) {
+        room.drawStrokeCount = (room.drawStrokeCount || 0) + 1;
+      }
+      room.drawInkDistance =
+        (room.drawInkDistance || 0) + Math.hypot(x1 - x0, y1 - y0);
+    }
 
     socket.to(room.code).emit("draw_stroke", stroke);
   });
@@ -783,7 +1084,40 @@ io.on("connection", (socket) => {
     if (room.drawerId !== socket.id) return;
 
     room.strokes = [];
+    room.drawInkDistance = 0;
+    room.drawStrokeCount = 0;
     socket.to(room.code).emit("clear_board");
+  });
+
+  socket.on("set_room_bots", (payload = {}, callback) => {
+    const respond = (data) => {
+      if (typeof callback === "function") callback(data);
+    };
+    const room = rooms.get(socket.data.roomCode);
+    if (!room) {
+      respond({ ok: false, error: "Room not found." });
+      return;
+    }
+    if (room.hostId !== socket.id) {
+      respond({ ok: false, error: "Only the room host can manage bots." });
+      return;
+    }
+    if (room.phase !== "lobby") {
+      respond({ ok: false, error: "Bots can only be changed in the lobby." });
+      return;
+    }
+    const desired = Math.max(0, Math.min(1, Number(payload.botCount) || 0));
+    const humans = room.players.filter((p) => !p.isBot);
+    if (humans.length + desired > MAX_PLAYERS) {
+      respond({
+        ok: false,
+        error: `Room allows max ${MAX_PLAYERS} total players.`
+      });
+      return;
+    }
+    const count = syncRoomBots(room, desired);
+    emitRoomState(room);
+    respond({ ok: true, botCount: count });
   });
 
   socket.on("submit_guess", (payload = {}) => {
@@ -825,14 +1159,18 @@ io.on("connection", (socket) => {
     if (!player) return;
 
     const now = Date.now();
+    if (!room.roundStartTime || now - room.roundStartTime >= BLASTER_WINDOW_MS) {
+      return;
+    }
     if (now < (player.blasterReadyAt || 0)) {
       io.to(socket.id).emit("blaster_state", { readyAt: player.blasterReadyAt });
       return;
     }
 
-    // Reset player's Paint Blaster cooldown to 400 seconds
-    player.blasterReadyAt = now + 400 * 1000;
+    // Reset player's Paint Blaster cooldown to 220 seconds
+    player.blasterReadyAt = now + 220 * 1000;
     io.to(socket.id).emit("blaster_state", { readyAt: player.blasterReadyAt });
+    room.drawInkDistance = (room.drawInkDistance || 0) * 0.2;
 
     const seed = Math.floor(Math.random() * 1000000000);
     io.to(room.code).emit("paint_blaster_splat", {
