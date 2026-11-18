@@ -239,7 +239,9 @@ const ALLOWED_SHIRT_DECALS = new Set([
   "cbert",
   "hunter",
   "fours",
-  "tubz"
+  "tubz",
+  "lenny",
+  "remig"
 ]);
 
 const SPECIAL_DECAL_COLORS = {
@@ -247,7 +249,9 @@ const SPECIAL_DECAL_COLORS = {
   cbert: "#dc2626",
   hunter: "#10b981",
   fours: "#a855f7",
-  tubz: "#f97316"
+  tubz: "#f97316",
+  lenny: "#ef4444",
+  remig: "#d6be8a"
 };
 
 function sanitizeAvatar(raw, fallbackShirtColor) {
@@ -1068,7 +1072,7 @@ io.on("connection", (socket) => {
       room.strokes.shift();
     }
     if (color.toLowerCase() !== "#ffffff") {
-      if (isDot) {
+      if (stroke.isDot) {
         room.drawStrokeCount = (room.drawStrokeCount || 0) + 1;
       }
       room.drawInkDistance =
